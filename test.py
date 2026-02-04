@@ -245,8 +245,9 @@ def main():
             )
             df.loc[len(df)] = Series(class_result_dict)
         # Compute mean only for numeric columns
-        numeric_cols = df.select_dtypes(include=np.number).columns
-        average_row = df[numeric_cols].mean().to_dict()
+        metric_cols = ["pixel AUC", "pixel AP", "image AUC", "image AP"]
+        df[metric_cols] = df[metric_cols].apply(lambda col: col.astype(float))
+        average_row = df[metric_cols].mean().to_dict()
         # Set the 'class name' for this row
         average_row["class name"] = "Average"
         # Append to DataFrame
