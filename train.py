@@ -3,13 +3,11 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 import logging
-from glob import glob
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
-import ipdb
 from utils import setup_seed
 from model.adapter import AdaptedCLIP
 from model.clip import create_model
@@ -165,12 +163,6 @@ def train_image_adapter(
             "image_optimizer": optimizer.state_dict(),
         }
         torch.save(model_dict, os.path.join(save_path, "image_adapter.pth"))
-        if (epoch + 1) % 1 == 0:
-            ckp_path = os.path.join(save_path, f"image_adapter_{epoch + 1}.pth")
-            torch.save(
-                model_dict,
-                ckp_path,
-            )
     return model
 
 
@@ -194,13 +186,19 @@ def main():
         default="few_shot",
         choices=["few_shot", "full_shot"],
     )
-    parser.add_argument("--shot", type=int, default=32, help="number of shots (0 means full shot)")
+    parser.add_argument(
+        "--shot", type=int, default=32, help="number of shots (0 means full shot)"
+    )
     parser.add_argument("--text_batch_size", type=int, default=16)
     parser.add_argument("--image_batch_size", type=int, default=2)
     parser.add_argument("--text_epoch", type=int, default=5, help="epochs for stage1")
     parser.add_argument("--image_epoch", type=int, default=20, help="epochs for stage2")
-    parser.add_argument("--text_lr", type=float, default=0.00001, help="learning rate for stage1")
-    parser.add_argument("--image_lr", type=float, default=0.0005, help="learning rate for stage2")
+    parser.add_argument(
+        "--text_lr", type=float, default=0.00001, help="learning rate for stage1"
+    )
+    parser.add_argument(
+        "--image_lr", type=float, default=0.0005, help="learning rate for stage2"
+    )
     parser.add_argument(
         "--criterion", type=str, default=["dice_loss", "focal_loss"], nargs="+"
     )
@@ -273,28 +271,6 @@ def main():
     # text_scheduler = MultiStepLR(text_optimizer, milestones=[400], gamma=0.1)
     image_scheduler = MultiStepLR(image_optimizer, milestones=[16000, 32000], gamma=0.5)
     # ========================================================
-    # load checkpoints if exists
-    text_file = glob(args.save_path + "/text_adapter.pth")
-    if len(text_file) > 0:
-        checkpoint = torch.load(text_file[0])
-        model.text_adapter.load_state_dict(checkpoint["text_adapter"])
-        text_optimizer.load_state_dict(checkpoint["text_optimizer"])
-        text_start_epoch = checkpoint["epoch"]
-        adapt_text = not (text_start_epoch == (args.text_epoch - 1))
-    elif args.text_epoch == 0:
-        adapt_text = False
-    else:
-        text_start_epoch = 0
-        adapt_text = True  # check if text adapter is loaded
-    file = glob(args.save_path + "/image_adapter.pth")
-    if len(file) > 0:
-        checkpoint = torch.load(file[0])
-        image_start_epoch = checkpoint["epoch"]
-        model.image_adapter.load_state_dict(checkpoint["image_adapter"])
-        image_optimizer.load_state_dict(checkpoint["image_optimizer"])
-    else:
-        image_start_epoch = 0
-    # ========================================================
     # load dataset
     if args.training_mode == "full_shot":
         args.shot = -1
@@ -317,22 +293,21 @@ def main():
     )
     # ========================================================
     # training
-    if adapt_text:
-        model = train_text_adapter(
-            adapted_model=model,
-            clip_surgery=clip_surgery,
-            text_norm_weight=args.text_norm_weight,
-            train_loader=text_dataloader,
-            optimizer=text_optimizer,
-            # scheduler=text_scheduler,
-            device=device,
-            start_epoch=text_start_epoch,
-            dataset_name=args.dataset,
-            save_path=args.save_path,
-            text_epoch=args.text_epoch,
-            img_size=args.img_size,
-            logger=logger,
-        )
+    model = train_text_adapter(
+        adapted_model=model,
+        clip_surgery=clip_surgery,
+        text_norm_weight=args.text_norm_weight,
+        train_loader=text_dataloader,
+        optimizer=text_optimizer,
+        # scheduler=text_scheduler,
+        device=device,
+        start_epoch=0,
+        dataset_name=args.dataset,
+        save_path=args.save_path,
+        text_epoch=args.text_epoch,
+        img_size=args.img_size,
+        logger=logger,
+    )
     del text_dataloader, text_dataset, clip_surgery, text_optimizer
     torch.cuda.empty_cache()
     with torch.no_grad():
@@ -350,7 +325,7 @@ def main():
         optimizer=image_optimizer,
         scheduler=image_scheduler,
         device=device,
-        start_epoch=image_start_epoch,
+        start_epoch=0,
         save_path=args.save_path,
         img_size=args.img_size,
         logger=logger,
