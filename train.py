@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 import logging
+import wandb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,6 +19,7 @@ from forward_utils import (
     calculate_similarity_map,
     calculate_seg_loss,
 )
+from evaluation.evaluator import evaluate_dataset
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -211,6 +213,16 @@ def main():
     parser.add_argument("--image_adapt_weight", type=float, default=0.1)
     parser.add_argument("--text_adapt_until", type=int, default=3)
     parser.add_argument("--image_adapt_until", type=int, default=6)
+    # evaluation
+    parser.add_argument(
+        "--test_datasets",
+        type=str,
+        nargs="+",
+        default=["MVTec", "Colon_Kvasir", "MPDD"],
+        help="datasets used for evaluation",
+    )
+    parser.add_argument("--batch_size_test", type=int, default=32)
+    parser.add_argument("--visualize", action="store_true")
 
     args = parser.parse_args()
     # ========================================================
@@ -224,6 +236,13 @@ def main():
         level=logging.INFO,
     )
     logger.info("args: %s", vars(args))
+
+    wandb.init(
+        project=f"AA-clip-_{args.dataset}_{args.shot}_{args.text_adapt_until}_{args.image_adapt_until}",
+        name=f"seed_{args.seed}",
+        config=vars(args),
+    )
+
     # set device
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda:0" if use_cuda else "cpu")
@@ -330,6 +349,40 @@ def main():
         img_size=args.img_size,
         logger=logger,
     )
+
+    # ========================================================
+    # evaluation on multiple datasets
+    logger.info("Starting evaluation on test datasets...")
+
+    model.eval()
+
+    for test_dataset in args.test_datasets:
+
+        logger.info(f"Evaluating on {test_dataset}")
+
+        df, avg = evaluate_dataset(
+            model=model,
+            dataset_name=test_dataset,
+            img_size=args.img_size,
+            batch_size=args.batch_size_test,
+            shot=args.shot,
+            device=device,
+            save_path=args.save_path,
+            visualize_flag=args.visualize,
+            logger=logger,
+        )
+
+        logger.info("\n%s", df.to_string(index=False))
+
+        # log to wandb
+        wandb.log(
+            {
+                f"{test_dataset}/pixel_auc": avg["pixel AUC"],
+                f"{test_dataset}/pixel_ap": avg["pixel AP"],
+                f"{test_dataset}/image_auc": avg["image AUC"],
+                f"{test_dataset}/image_ap": avg["image AP"],
+            }
+        )
 
 
 if __name__ == "__main__":
