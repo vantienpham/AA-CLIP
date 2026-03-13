@@ -38,7 +38,11 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def get_support_features(model, support_loader, device):
     all_features = []
-    for input_data in support_loader:  # bs always=1. training for an epoch first, Then use this updated model for memory bank construction.
+    for (
+        input_data
+    ) in (
+        support_loader
+    ):  # bs always=1. training for an epoch first, Then use this updated model for memory bank construction.
         image = input_data[0].to(device)
         patch_tokens = model(image)
         patch_tokens = [t.reshape(-1, 768) for t in patch_tokens]
@@ -244,15 +248,16 @@ def main():
                 domain=DOMAINS[args.dataset],
             )
             df.loc[len(df)] = Series(class_result_dict)
-        # Compute mean only for numeric columns
+
         metric_cols = ["pixel AUC", "pixel AP", "image AUC", "image AP"]
-        df[metric_cols] = df[metric_cols].apply(lambda col: col.astype(float))
-        average_row = df[metric_cols].mean().to_dict()
-        # Set the 'class name' for this row
-        average_row["class name"] = "Average"
-        # Append to DataFrame
-        df.loc[len(df)] = Series(average_row)
-        logger.info("final results:\n%s", df.to_string(index=False, justify="center"))
+        df[metric_cols] = df[metric_cols].astype(float)
+
+        avg = df[metric_cols].mean().to_dict()
+        avg["class name"] = "Average"
+        df.loc[len(df)] = Series(avg)
+
+        logger.info("\n%s", df.to_string(index=False))
+        logging.shutdown()
 
 
 if __name__ == "__main__":
