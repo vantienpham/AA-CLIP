@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SHOTS=(2 16 64)
+SHOTS=(2 16 64 -1)
 SEEDS=$(seq 0 100)
 
 BASE_SAVE_DIR="ckpt"
@@ -47,7 +47,8 @@ module load pytorch/2.6
 python train.py \
   --shot ${shot} \
   --seed ${seed} \
-  --save_path ${SAVE_PATH}
+  --save_path ${SAVE_PATH} \
+  --test_datasets ["MVTec", "Colon_clinicDB", "Colon_colonDB", "Colon_cvc300", "Colon_Kvasir", "MPDD", "Brain", "Liver", "Retina", "BTAD"]
 
 EOT
 
