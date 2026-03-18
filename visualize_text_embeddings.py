@@ -189,6 +189,131 @@ def plot_per_class(
     plt.close()
 
 
+def process_dataset(
+    dataset_name: str,
+    model,
+    device,
+    save_path: str,
+    logger: logging.Logger,
+):
+    """Collect embeddings for a single dataset and generate visualizations."""
+    embeddings_list = []
+    labels_list = []
+    class_names_list = []
+
+    if dataset_name not in CLASS_NAMES:
+        logger.warning("skip unsupported dataset: %s", dataset_name)
+        return
+
+    with torch.no_grad():
+        for class_name in CLASS_NAMES[dataset_name]:
+            real_name = REAL_NAMES[dataset_name][class_name]
+            normal_sentences, abnormal_sentences = build_sentences(real_name)
+            for label_index, sentences in enumerate(
+                [normal_sentences, abnormal_sentences]
+            ):
+                tokens = tokenize(sentences).to(device)
+                embeddings = model.encode_text(tokens)
+                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+                for embedding in embeddings.cpu().numpy():
+                    embeddings_list.append(embedding)
+                    labels_list.append(label_index)
+                    class_names_list.append(class_name)
+
+    if len(embeddings_list) == 0:
+        logger.warning("no embeddings collected for dataset: %s", dataset_name)
+        return
+
+    embeddings_array = np.stack(embeddings_list)
+    labels_array = np.array(labels_list)
+    class_names_array = np.array(class_names_list)
+
+    logger.info(
+        "dataset=%s: collected %d embeddings (normal=%d, abnormal=%d)",
+        dataset_name,
+        len(embeddings_array),
+        int((labels_array == 0).sum()),
+        int((labels_array == 1).sum()),
+    )
+
+    euclidean_distance, cosine_distance = centroid_distances(
+        embeddings_array, labels_array
+    )
+    logger.info(
+        "dataset=%s: centroid distances - euclidean: %.4f, cosine: %.4f",
+        dataset_name,
+        euclidean_distance,
+        cosine_distance,
+    )
+
+    # PCA
+    pca = PCA(n_components=2, random_state=42)
+    pca_2d = pca.fit_transform(embeddings_array)
+    explained_variance = pca.explained_variance_ratio_
+    logger.info(
+        "dataset=%s: PCA explained variance - PC1: %.3f, PC2: %.3f",
+        dataset_name,
+        explained_variance[0],
+        explained_variance[1],
+    )
+
+    # t-SNE
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42, verbose=0)
+    tsne_2d = tsne.fit_transform(embeddings_array)
+
+    # Generate plots with dataset-specific filenames
+    pca_normal_path = os.path.join(
+        save_path, f"{dataset_name.lower()}_pca_normal_vs_abnormal.png"
+    )
+    pca_per_class_path = os.path.join(
+        save_path, f"{dataset_name.lower()}_pca_per_class.png"
+    )
+    tsne_normal_path = os.path.join(
+        save_path, f"{dataset_name.lower()}_tsne_normal_vs_abnormal.png"
+    )
+    tsne_per_class_path = os.path.join(
+        save_path, f"{dataset_name.lower()}_tsne_per_class.png"
+    )
+
+    plot_normal_abnormal(
+        coords_2d=pca_2d,
+        all_embeddings=embeddings_array,
+        all_labels=labels_array,
+        base_title=f"PCA - text embeddings (stage-1 projector) | {dataset_name}",
+        save_path=pca_normal_path,
+    )
+    plot_per_class(
+        coords_2d=pca_2d,
+        all_embeddings=embeddings_array,
+        all_labels=labels_array,
+        all_class_names=class_names_array,
+        base_title=f"PCA - text embeddings per class ({dataset_name})",
+        save_path=pca_per_class_path,
+    )
+
+    plot_normal_abnormal(
+        coords_2d=tsne_2d,
+        all_embeddings=embeddings_array,
+        all_labels=labels_array,
+        base_title=f"t-SNE - text embeddings (stage-1 projector) | {dataset_name}",
+        save_path=tsne_normal_path,
+    )
+    plot_per_class(
+        coords_2d=tsne_2d,
+        all_embeddings=embeddings_array,
+        all_labels=labels_array,
+        all_class_names=class_names_array,
+        base_title=f"t-SNE - text embeddings per class ({dataset_name})",
+        save_path=tsne_per_class_path,
+    )
+
+    logger.info("dataset=%s: saved plots:", dataset_name)
+    logger.info("  %s", pca_normal_path)
+    logger.info("  %s", pca_per_class_path)
+    logger.info("  %s", tsne_normal_path)
+    logger.info("  %s", tsne_per_class_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize text embeddings")
     parser.add_argument(
@@ -199,10 +324,7 @@ def main():
     )
     parser.add_argument("--img_size", type=int, default=518)
     parser.add_argument("--relu", action="store_true")
-    parser.add_argument("--datasets", type=str, nargs="+", default=["MVTec"])
-    parser.add_argument(
-        "--ckpt_path", type=str, default="ckpt/baseline/text_adapter.pth"
-    )
+    parser.add_argument("--dataset", type=str, default="MVTec")
     parser.add_argument("--save_path", type=str, default="ckpt/baseline")
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--text_adapt_weight", type=float, default=0.1)
@@ -252,108 +374,15 @@ def main():
     text_ckpt = torch.load(text_ckpt, map_location=device)
     model.text_adapter.load_state_dict(text_ckpt["text_adapter"])
 
-    all_embeddings = []
-    all_labels = []
-    all_class_names = []
-
-    with torch.no_grad():
-        for dataset_name in args.datasets:
-            if dataset_name not in CLASS_NAMES:
-                logger.warning("skip unsupported dataset: %s", dataset_name)
-                continue
-
-            for class_name in CLASS_NAMES[dataset_name]:
-                real_name = REAL_NAMES[dataset_name][class_name]
-                normal_sentences, abnormal_sentences = build_sentences(real_name)
-                for label_index, sentences in enumerate(
-                    [normal_sentences, abnormal_sentences]
-                ):
-                    tokens = tokenize(sentences).to(device)
-                    embeddings = model.encode_text(tokens)
-                    embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
-                    for embedding in embeddings.cpu().numpy():
-                        all_embeddings.append(embedding)
-                        all_labels.append(label_index)
-                        all_class_names.append(f"{dataset_name}/{class_name}")
-
-    if len(all_embeddings) == 0:
-        raise RuntimeError("No text embeddings collected. Check --datasets input.")
-
-    all_embeddings = np.stack(all_embeddings)
-    all_labels = np.array(all_labels)
-    all_class_names = np.array(all_class_names)
-
-    logger.info(
-        "total embeddings: %d (normal=%d, abnormal=%d)",
-        len(all_embeddings),
-        int((all_labels == 0).sum()),
-        int((all_labels == 1).sum()),
+    process_dataset(
+        dataset_name=args.dataset,
+        model=model,
+        device=device,
+        save_path=args.save_path,
+        logger=logger,
     )
 
-    global_euclidean_distance, global_cosine_distance = centroid_distances(
-        all_embeddings, all_labels
-    )
-    logger.info(
-        "global centroid distances - euclidean: %.4f, cosine: %.4f",
-        global_euclidean_distance,
-        global_cosine_distance,
-    )
-
-    pca = PCA(n_components=2, random_state=42)
-    pca_2d = pca.fit_transform(all_embeddings)
-    explained_variance = pca.explained_variance_ratio_
-    logger.info(
-        "PCA explained variance - PC1: %.3f, PC2: %.3f",
-        explained_variance[0],
-        explained_variance[1],
-    )
-
-    tsne = TSNE(n_components=2, perplexity=30, verbose=1)
-    tsne_2d = tsne.fit_transform(all_embeddings)
-
-    datasets_title = ",".join(args.datasets)
-
-    pca_normal_path = os.path.join(args.save_path, "pca_normal_vs_abnormal.png")
-    pca_per_class_path = os.path.join(args.save_path, "pca_per_class.png")
-    tsne_normal_path = os.path.join(args.save_path, "tsne_normal_vs_abnormal.png")
-    tsne_per_class_path = os.path.join(args.save_path, "tsne_per_class.png")
-
-    plot_normal_abnormal(
-        coords_2d=pca_2d,
-        all_embeddings=all_embeddings,
-        all_labels=all_labels,
-        base_title=f"PCA - text embeddings (stage-1 projector) | {datasets_title} - all classes",
-        save_path=pca_normal_path,
-    )
-    plot_per_class(
-        coords_2d=pca_2d,
-        all_embeddings=all_embeddings,
-        all_labels=all_labels,
-        all_class_names=all_class_names,
-        base_title=f"PCA - text embeddings per class ({datasets_title})",
-        save_path=pca_per_class_path,
-    )
-
-    plot_normal_abnormal(
-        coords_2d=tsne_2d,
-        all_embeddings=all_embeddings,
-        all_labels=all_labels,
-        base_title=f"t-SNE - text embeddings (stage-1 projector) | {datasets_title} - all classes",
-        save_path=tsne_normal_path,
-    )
-    plot_per_class(
-        coords_2d=tsne_2d,
-        all_embeddings=all_embeddings,
-        all_labels=all_labels,
-        all_class_names=all_class_names,
-        base_title=f"t-SNE - text embeddings per class ({datasets_title})",
-        save_path=tsne_per_class_path,
-    )
-
-    logger.info("saved plots: %s", pca_normal_path)
-    logger.info("saved plots: %s", pca_per_class_path)
-    logger.info("saved plots: %s", tsne_normal_path)
-    logger.info("saved plots: %s", tsne_per_class_path)
+    logger.info("dataset processed: %s", args.dataset)
     logging.shutdown()
 
 
