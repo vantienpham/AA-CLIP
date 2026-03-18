@@ -258,8 +258,29 @@ def process_dataset(
     )
 
     # t-SNE
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42, verbose=0)
-    tsne_2d = tsne.fit_transform(embeddings_array)
+    num_samples = embeddings_array.shape[0]
+    if num_samples < 2:
+        logger.warning(
+            "dataset=%s: skip t-SNE because n_samples=%d is too small",
+            dataset_name,
+            num_samples,
+        )
+        tsne_2d = None
+    else:
+        tsne_perplexity = min(30, num_samples - 1)
+        logger.info(
+            "dataset=%s: t-SNE perplexity set to %d (n_samples=%d)",
+            dataset_name,
+            tsne_perplexity,
+            num_samples,
+        )
+        tsne = TSNE(
+            n_components=2,
+            perplexity=tsne_perplexity,
+            random_state=42,
+            verbose=0,
+        )
+        tsne_2d = tsne.fit_transform(embeddings_array)
 
     # Generate plots with dataset-specific filenames
     pca_normal_path = os.path.join(
@@ -291,27 +312,29 @@ def process_dataset(
         save_path=pca_per_class_path,
     )
 
-    plot_normal_abnormal(
-        coords_2d=tsne_2d,
-        all_embeddings=embeddings_array,
-        all_labels=labels_array,
-        base_title=f"t-SNE - text embeddings (stage-1 projector) | {dataset_name}",
-        save_path=tsne_normal_path,
-    )
-    plot_per_class(
-        coords_2d=tsne_2d,
-        all_embeddings=embeddings_array,
-        all_labels=labels_array,
-        all_class_names=class_names_array,
-        base_title=f"t-SNE - text embeddings per class ({dataset_name})",
-        save_path=tsne_per_class_path,
-    )
+    if tsne_2d is not None:
+        plot_normal_abnormal(
+            coords_2d=tsne_2d,
+            all_embeddings=embeddings_array,
+            all_labels=labels_array,
+            base_title=f"t-SNE - text embeddings (stage-1 projector) | {dataset_name}",
+            save_path=tsne_normal_path,
+        )
+        plot_per_class(
+            coords_2d=tsne_2d,
+            all_embeddings=embeddings_array,
+            all_labels=labels_array,
+            all_class_names=class_names_array,
+            base_title=f"t-SNE - text embeddings per class ({dataset_name})",
+            save_path=tsne_per_class_path,
+        )
 
     logger.info("dataset=%s: saved plots:", dataset_name)
     logger.info("  %s", pca_normal_path)
     logger.info("  %s", pca_per_class_path)
-    logger.info("  %s", tsne_normal_path)
-    logger.info("  %s", tsne_per_class_path)
+    if tsne_2d is not None:
+        logger.info("  %s", tsne_normal_path)
+        logger.info("  %s", tsne_per_class_path)
 
 
 def main():
