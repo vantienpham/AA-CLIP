@@ -8,7 +8,9 @@ import numpy as np
 import torch
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
+from torch.utils.data import DataLoader
 
+from dataset import get_dataset
 from dataset.constants import CLASS_NAMES, PROMPTS, REAL_NAMES
 from model.adapter import AdaptedCLIP
 from model.clip import create_model
@@ -48,7 +50,12 @@ def build_sentences(real_name: str):
     return expand(prompt_normal), expand(prompt_abnormal)
 
 
-def centroid_distances(embeddings: np.ndarray, labels: np.ndarray):
+def safe_centroid_distances(embeddings: np.ndarray, labels: np.ndarray):
+    has_normal = np.any(labels == 0)
+    has_abnormal = np.any(labels == 1)
+    if not has_normal or not has_abnormal:
+        return np.nan, np.nan
+
     normal_center = embeddings[labels == 0].mean(axis=0)
     abnormal_center = embeddings[labels == 1].mean(axis=0)
     euclidean_distance = np.linalg.norm(normal_center - abnormal_center)
@@ -60,6 +67,9 @@ def centroid_distances(embeddings: np.ndarray, labels: np.ndarray):
 
 def draw_centroid(ax, coords_2d: np.ndarray, labels: np.ndarray, label_index: int):
     class_mask = labels == label_index
+    if not np.any(class_mask):
+        return None
+
     center_x = coords_2d[class_mask, 0].mean()
     center_y = coords_2d[class_mask, 1].mean()
     ax.scatter(
@@ -83,15 +93,19 @@ def plot_normal_abnormal(
     base_title: str,
     save_path: str,
 ):
-    euclidean_distance, cosine_distance = centroid_distances(all_embeddings, all_labels)
+    euclidean_distance, cosine_distance = safe_centroid_distances(
+        all_embeddings, all_labels
+    )
     title = (
-        f"{base_title}\nCentroid dist (768-d) — "
+        f"{base_title}\nCentroid dist (768-d) - "
         f"Euclidean: {euclidean_distance:.4f}  |  Cosine: {cosine_distance:.4f}"
     )
 
     fig, ax = plt.subplots(figsize=(9, 7))
     for label_index in [0, 1]:
         class_mask = all_labels == label_index
+        if not np.any(class_mask):
+            continue
         ax.scatter(
             coords_2d[class_mask, 0],
             coords_2d[class_mask, 1],
@@ -102,16 +116,18 @@ def plot_normal_abnormal(
             edgecolors="none",
         )
 
-    center_normal_x, center_normal_y = draw_centroid(ax, coords_2d, all_labels, 0)
-    center_abnormal_x, center_abnormal_y = draw_centroid(ax, coords_2d, all_labels, 1)
-    ax.plot(
-        [center_normal_x, center_abnormal_x],
-        [center_normal_y, center_abnormal_y],
-        color="gray",
-        linestyle="--",
-        linewidth=1.2,
-        zorder=4,
-    )
+    normal_center = draw_centroid(ax, coords_2d, all_labels, 0)
+    abnormal_center = draw_centroid(ax, coords_2d, all_labels, 1)
+
+    if normal_center is not None and abnormal_center is not None:
+        ax.plot(
+            [normal_center[0], abnormal_center[0]],
+            [normal_center[1], abnormal_center[1]],
+            color="gray",
+            linestyle="--",
+            linewidth=1.2,
+            zorder=4,
+        )
 
     ax.set_title(title, fontsize=12)
     ax.legend(fontsize=11)
@@ -145,6 +161,8 @@ def plot_per_class(
 
         for label_index in [0, 1]:
             label_mask = class_labels == label_index
+            if not np.any(label_mask):
+                continue
             ax.scatter(
                 class_coords_2d[label_mask, 0],
                 class_coords_2d[label_mask, 1],
@@ -155,22 +173,20 @@ def plot_per_class(
                 edgecolors="none",
             )
 
-        center_normal_x, center_normal_y = draw_centroid(
-            ax, class_coords_2d, class_labels, 0
-        )
-        center_abnormal_x, center_abnormal_y = draw_centroid(
-            ax, class_coords_2d, class_labels, 1
-        )
-        ax.plot(
-            [center_normal_x, center_abnormal_x],
-            [center_normal_y, center_abnormal_y],
-            color="gray",
-            linestyle="--",
-            linewidth=1.0,
-            zorder=4,
-        )
+        normal_center = draw_centroid(ax, class_coords_2d, class_labels, 0)
+        abnormal_center = draw_centroid(ax, class_coords_2d, class_labels, 1)
 
-        euclidean_distance, cosine_distance = centroid_distances(
+        if normal_center is not None and abnormal_center is not None:
+            ax.plot(
+                [normal_center[0], abnormal_center[0]],
+                [normal_center[1], abnormal_center[1]],
+                color="gray",
+                linestyle="--",
+                linewidth=1.0,
+                zorder=4,
+            )
+
+        euclidean_distance, cosine_distance = safe_centroid_distances(
             class_embeddings, class_labels
         )
         short_name = cls.split("/")[-1]
@@ -189,21 +205,13 @@ def plot_per_class(
     plt.close()
 
 
-def process_dataset(
-    dataset_name: str,
-    model,
-    device,
-    save_path: str,
-    logger: logging.Logger,
-):
-    """Collect embeddings for a single dataset and generate visualizations."""
+def collect_text_embeddings(dataset_name: str, model, device):
     embeddings_list = []
     labels_list = []
     class_names_list = []
 
     if dataset_name not in CLASS_NAMES:
-        logger.warning("skip unsupported dataset: %s", dataset_name)
-        return
+        return None, None, None
 
     with torch.no_grad():
         for class_name in CLASS_NAMES[dataset_name]:
@@ -215,38 +223,118 @@ def process_dataset(
                 tokens = tokenize(sentences).to(device)
                 embeddings = model.encode_text(tokens)
                 embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
-                for embedding in embeddings.cpu().numpy():
-                    embeddings_list.append(embedding)
-                    labels_list.append(label_index)
-                    class_names_list.append(class_name)
 
-    if len(embeddings_list) == 0:
-        logger.warning("no embeddings collected for dataset: %s", dataset_name)
+                embeddings_list.extend(embeddings.cpu().numpy())
+                labels_list.extend([label_index] * len(sentences))
+                class_names_list.extend([class_name] * len(sentences))
+
+    return (
+        np.stack(embeddings_list),
+        np.array(labels_list),
+        np.array(class_names_list),
+    )
+
+
+def collect_image_embeddings(
+    dataset_name: str,
+    model,
+    device,
+    img_size: int,
+    batch_size: int,
+):
+    embeddings_list = []
+    labels_list = []
+    class_names_list = []
+
+    kwargs = {"num_workers": 4, "pin_memory": True} if device.type == "cuda" else {}
+    datasets = get_dataset(
+        dataset_name=dataset_name,
+        img_size=img_size,
+        training_mode=None,
+        shot=-1,
+        stage="visualize",
+        logger=None,
+    )
+
+    with torch.no_grad():
+        for class_name, dataset in datasets.items():
+            loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                **kwargs,
+            )
+            for batch in loader:
+                image = batch["image"].to(device)
+                labels = batch["label"]
+
+                _, det_embedding = model(image)
+                det_embedding = det_embedding / det_embedding.norm(dim=-1, keepdim=True)
+
+                embeddings_list.extend(det_embedding.cpu().numpy())
+                labels_list.extend(labels.cpu().numpy().tolist())
+                class_names_list.extend([class_name] * image.size(0))
+
+    return (
+        np.stack(embeddings_list),
+        np.array(labels_list),
+        np.array(class_names_list),
+    )
+
+
+def process_dataset(
+    dataset_name: str,
+    model,
+    device,
+    modality: str,
+    img_size: int,
+    batch_size: int,
+    save_path: str,
+    logger: logging.Logger,
+):
+    if modality == "text":
+        arrays = collect_text_embeddings(dataset_name, model, device)
+        if arrays[0] is None:
+            logger.warning(
+                "skip unsupported dataset for text modality: %s", dataset_name
+            )
+            return
+        embeddings_array, labels_array, class_names_array = arrays
+        title_prefix = "text embeddings (stage-1 projector)"
+        file_prefix = "text"
+    else:
+        embeddings_array, labels_array, class_names_array = collect_image_embeddings(
+            dataset_name, model, device, img_size, batch_size
+        )
+        title_prefix = "image embeddings (stage-2 detector token)"
+        file_prefix = "image"
+
+    if embeddings_array.shape[0] == 0:
+        logger.warning(
+            "no %s embeddings collected for dataset: %s", modality, dataset_name
+        )
         return
 
-    embeddings_array = np.stack(embeddings_list)
-    labels_array = np.array(labels_list)
-    class_names_array = np.array(class_names_list)
-
     logger.info(
-        "dataset=%s: collected %d embeddings (normal=%d, abnormal=%d)",
+        "dataset=%s: collected %d %s embeddings (normal=%d, abnormal=%d)",
         dataset_name,
         len(embeddings_array),
+        modality,
         int((labels_array == 0).sum()),
         int((labels_array == 1).sum()),
     )
 
-    euclidean_distance, cosine_distance = centroid_distances(
+    euclidean_distance, cosine_distance = safe_centroid_distances(
         embeddings_array, labels_array
     )
     logger.info(
-        "dataset=%s: centroid distances - euclidean: %.4f, cosine: %.4f",
+        "dataset=%s: %s centroid distances - euclidean: %.4f, cosine: %.4f",
         dataset_name,
+        modality,
         euclidean_distance,
         cosine_distance,
     )
 
-    # PCA
     pca = PCA(n_components=2, random_state=42)
     pca_2d = pca.fit_transform(embeddings_array)
     explained_variance = pca.explained_variance_ratio_
@@ -257,7 +345,6 @@ def process_dataset(
         explained_variance[1],
     )
 
-    # t-SNE
     num_samples = embeddings_array.shape[0]
     if num_samples < 2:
         logger.warning(
@@ -282,25 +369,24 @@ def process_dataset(
         )
         tsne_2d = tsne.fit_transform(embeddings_array)
 
-    # Generate plots with dataset-specific filenames
     pca_normal_path = os.path.join(
-        save_path, f"{dataset_name.lower()}_pca_normal_vs_abnormal.png"
+        save_path, f"{dataset_name.lower()}_{file_prefix}_pca_normal_vs_abnormal.png"
     )
     pca_per_class_path = os.path.join(
-        save_path, f"{dataset_name.lower()}_pca_per_class.png"
+        save_path, f"{dataset_name.lower()}_{file_prefix}_pca_per_class.png"
     )
     tsne_normal_path = os.path.join(
-        save_path, f"{dataset_name.lower()}_tsne_normal_vs_abnormal.png"
+        save_path, f"{dataset_name.lower()}_{file_prefix}_tsne_normal_vs_abnormal.png"
     )
     tsne_per_class_path = os.path.join(
-        save_path, f"{dataset_name.lower()}_tsne_per_class.png"
+        save_path, f"{dataset_name.lower()}_{file_prefix}_tsne_per_class.png"
     )
 
     plot_normal_abnormal(
         coords_2d=pca_2d,
         all_embeddings=embeddings_array,
         all_labels=labels_array,
-        base_title=f"PCA - text embeddings (stage-1 projector) | {dataset_name}",
+        base_title=f"PCA - {title_prefix} | {dataset_name}",
         save_path=pca_normal_path,
     )
     plot_per_class(
@@ -308,7 +394,7 @@ def process_dataset(
         all_embeddings=embeddings_array,
         all_labels=labels_array,
         all_class_names=class_names_array,
-        base_title=f"PCA - text embeddings per class ({dataset_name})",
+        base_title=f"PCA - {modality} embeddings per class ({dataset_name})",
         save_path=pca_per_class_path,
     )
 
@@ -317,7 +403,7 @@ def process_dataset(
             coords_2d=tsne_2d,
             all_embeddings=embeddings_array,
             all_labels=labels_array,
-            base_title=f"t-SNE - text embeddings (stage-1 projector) | {dataset_name}",
+            base_title=f"t-SNE - {title_prefix} | {dataset_name}",
             save_path=tsne_normal_path,
         )
         plot_per_class(
@@ -325,7 +411,7 @@ def process_dataset(
             all_embeddings=embeddings_array,
             all_labels=labels_array,
             all_class_names=class_names_array,
-            base_title=f"t-SNE - text embeddings per class ({dataset_name})",
+            base_title=f"t-SNE - {modality} embeddings per class ({dataset_name})",
             save_path=tsne_per_class_path,
         )
 
@@ -337,8 +423,8 @@ def process_dataset(
         logger.info("  %s", tsne_per_class_path)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Visualize text embeddings")
+def _build_parser():
+    parser = argparse.ArgumentParser(description="Visualize CLIP embeddings")
     parser.add_argument(
         "--model_name",
         type=str,
@@ -350,18 +436,23 @@ def main():
     parser.add_argument("--dataset", type=str, default="MVTec")
     parser.add_argument("--save_path", type=str, default="ckpt/baseline")
     parser.add_argument("--seed", type=int, default=111)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--text_adapt_weight", type=float, default=0.1)
     parser.add_argument("--image_adapt_weight", type=float, default=0.1)
     parser.add_argument("--text_adapt_until", type=int, default=3)
     parser.add_argument("--image_adapt_until", type=int, default=6)
+    return parser
 
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
-    # ========================================================
     setup_seed(args.seed)
     os.makedirs(args.save_path, exist_ok=True)
+
     logger = logging.getLogger(__name__)
     logging.basicConfig(
-        filename=os.path.join(args.save_path, "visualize_text_embeddings.log"),
+        filename=os.path.join(args.save_path, "visualize_embeddings.log"),
         encoding="utf-8",
         level=logging.INFO,
     )
@@ -391,16 +482,36 @@ def main():
     model.eval()
 
     text_ckpt = os.path.join(args.save_path, "text_adapter.pth")
+    image_ckpt = os.path.join(args.save_path, "image_adapter.pth")
     if not os.path.isfile(text_ckpt):
         raise FileNotFoundError(f"Missing {text_ckpt}")
+    if not os.path.isfile(image_ckpt):
+        raise FileNotFoundError(f"Missing {image_ckpt}")
+
     logger.info("loading text adapter from %s", text_ckpt)
     text_ckpt = torch.load(text_ckpt, map_location=device)
     model.text_adapter.load_state_dict(text_ckpt["text_adapter"])
-
     process_dataset(
         dataset_name=args.dataset,
         model=model,
         device=device,
+        modality="text",
+        img_size=args.img_size,
+        batch_size=args.batch_size,
+        save_path=args.save_path,
+        logger=logger,
+    )
+
+    logger.info("loading image adapter from %s", image_ckpt)
+    image_ckpt = torch.load(image_ckpt, map_location=device)
+    model.image_adapter.load_state_dict(image_ckpt["image_adapter"])
+    process_dataset(
+        dataset_name=args.dataset,
+        model=model,
+        device=device,
+        modality="image",
+        img_size=args.img_size,
+        batch_size=args.batch_size,
         save_path=args.save_path,
         logger=logger,
     )
