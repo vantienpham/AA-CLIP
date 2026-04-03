@@ -1,10 +1,10 @@
 #!/bin/bash
 
-SHOTS=(2 16 64 -1)
-SEEDS=$(seq 0 100)
+SHOTS=(2)
+SEEDS=$(seq 1 128)
 
 BASE_SAVE_DIR="ckpt"
-MAX_JOBS=10   # maximum number of simultaneous jobs
+MAX_JOBS=3   # maximum number of simultaneous jobs
 
 mkdir -p ${BASE_SAVE_DIR}
 
@@ -32,10 +32,10 @@ for shot in "${SHOTS[@]}"; do
     sbatch <<EOT
 #!/bin/bash
 #SBATCH --time=7-00:00:00
-#SBATCH --partition=besteffort
+#SBATCH --partition=ea
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:a40-48:1
 #SBATCH --cpus-per-gpu=16
 #SBATCH --job-name=aaclip_s${shot}_seed${seed}
 #SBATCH --output=${SAVE_PATH}/job_%j.out
@@ -48,7 +48,6 @@ python train.py \
   --shot ${shot} \
   --seed ${seed} \
   --save_path ${SAVE_PATH} \
-  --test_datasets ["MVTec", "Colon_clinicDB", "Colon_colonDB", "Colon_cvc300", "Colon_Kvasir", "MPDD", "Brain", "Liver", "Retina", "BTAD"]
 
 EOT
 
